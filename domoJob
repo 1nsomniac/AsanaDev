@@ -326,15 +326,11 @@ where [action] != 'removed'
 , assignmentEvent as (
 select 
 row_number() over (partition by resourcegid order by createdAt) rn,
-case 
-    when assignee is not null 
-    then createdat
-end assignmentAddedAt,
 assignee,
 resourcegid,
 id
 from MinuteCalculation
-), historicalLookup as (
+), historicalAssigneeLookup as (
 select 
 resourcegid, id, rn, assignee,
     CAST(
@@ -348,316 +344,318 @@ FROM assignmentEvent
 )
 
 -- select h.*, m.* from minutecalculation m
--- left join historicalLookup h on h.id = m.id
+-- left join historicalAssigneeLookup h on h.id = m.id
 -- where m.resourcegid = '1177665031499346'
 -- order by m.ResourceGid, m.createdat desc
--- --48584
+--48584
 
--- ----------------------------------------------------------------------------------
--- --                                                                              --
--- --                                                                              --
--- --                             Custom Field Lookup                              --
--- --                                                                              --
--- --                                                                              --
--- ----------------------------------------------------------------------------------
--- , customFieldLookupAndJoin as ( -- this was originally the output which is why the refactoring was done here; I later needed to add successive logic and kept the refactoring here.
--- select
---     row_number() over (order by m.createdAt) Id
---     -- ,case when -- I was trying to use this to understand the current 'status' of a task before I realized that there was already a status field and I should just use that. Also this is terribly slow.
---     --     [type] = 'creation' and 
---     --     (
---     --         select
---     --         max(m2.CreatedAt) over (partition by m2.resourceGid, m2.[type], m2.sectionRemovedAt)
---     --         from MinuteCalculation m2
---     --         where m2.[type] = 'section' and m2.sectionRemovedAt is null and m2.resourceGid = m.resourceGid
---     --     ) is null
---     --     then 1
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                             Custom Field Lookup                              --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+, customFieldLookupAndJoin as ( -- this was originally the output which is why the refactoring was done here; I later needed to add successive logic and kept the refactoring here.
+select
+    row_number() over (order by m.createdAt) Id
+    -- ,case when -- I was trying to use this to understand the current 'status' of a task before I realized that there was already a status field and I should just use that. Also this is terribly slow.
+    --     [type] = 'creation' and 
+    --     (
+    --         select
+    --         max(m2.CreatedAt) over (partition by m2.resourceGid, m2.[type], m2.sectionRemovedAt)
+    --         from MinuteCalculation m2
+    --         where m2.[type] = 'section' and m2.sectionRemovedAt is null and m2.resourceGid = m.resourceGid
+    --     ) is null
+    --     then 1
 
         
---     --     when
---     --     [type] = 'section' and sectionRemovedAt is null
---     --     and max(m.CreatedAt) over (partition by resourceGid, [type], sectionRemovedAt) = m.CreatedAt
---     --     then 1
---     --     else 0
---     --     end 'Last Section Added'
+    --     when
+    --     [type] = 'section' and sectionRemovedAt is null
+    --     and max(m.CreatedAt) over (partition by resourceGid, [type], sectionRemovedAt) = m.CreatedAt
+    --     then 1
+    --     else 0
+    --     end 'Last Section Added'
     
---     ,m.Id 'Event Id'
---     ,[type]
---     ,ResourceGid 'Task Gid'
---     ,tsk.Name
---     ,ChangeAction 'Change Action'
---     ,[User]
---     ,m.CreatedAt 'Updated At'
---     ,assignee 'Assignee'
---     ,CreatedBy 'Created By'
---     ,[Action]
---     ,rn
---     ,sectionName Section
---     ,Project
---     ,Team
---     ,sectionRemovedAt 'Left Section At'
---     ,assignmentRemovedAt 'Assignment Ended At'
---     ,meaningfulUpdate 'Meaningful Update'
---     ,mu 'Next Meaningful Update'
---     ,minutesInAssignment 'Minutes Assigned'
---     ,minutesInSection 'Minutes in Section'
---     --,murn
---     ,minutesInStatus 'Minutes in Status'
---     ,null 'Minutes til Due'
---     ,null 'Expected Work Minutes'
---     ,ISNULL(tsk.DueAt, FORMAT(tsk.DueOn, 'yyyy-MM-dd hh:mm:ss.fff')) 'Due At' -- Due at has a date time, but due on doesn't. I convert/combine them here.
---     ,AssigneedTo 'Currently Assigned To'
---     ,m.Completed
---     ,m.CompletedAt
---     ,completedBy 'Completed By'
---     ,TaskParentGid 'Task Parent Gid'
--- 	,stat.TaskStatus 'Task Status' --MT
--- --	,cptstat.TaskStatus TaskStatusCPT
--- 	,ewt.EstimatedWorkTime 'Estimated Work Time'
--- 	,imp.Importance
--- 	,rc.RequestCategory 'Request Category'
--- 	,lon.LoanOfficerName 'Loan Officer Name'
--- 	,loe.LoanOfficerEmail 'Loan Officer Email'
--- 	,loc.BranchLocation 'Task Branch'
--- 	,rq.Requester
--- 	,pr.TaskPriority 'Task Priority'
--- 	,st.TaskState 'Task State'
--- 	,ced.ComplianceEditDate 'Compliance Edit Date'
--- 	,cad.ComplianceApprovedDate 'Compliance Approve Date'
--- FROM MinuteCalculation m 
+    ,m.Id 'Event Id'
+    ,[type]
+    ,m.ResourceGid 'Task Gid'
+    ,tsk.Name
+    ,ChangeAction 'Change Action'
+    ,[User]
+    ,m.CreatedAt 'Updated At'
+    ,m.assignee 'Assignee'
+    ,h.historicalAssignee 'Historical Assignee'
+    ,CreatedBy 'Created By'
+    ,[Action]
+    ,m.rn
+    ,sectionName Section
+    ,Project
+    ,Team
+    ,sectionRemovedAt 'Left Section At'
+    ,assignmentRemovedAt 'Assignment Ended At'
+    ,meaningfulUpdate 'Meaningful Update'
+    ,mu 'Next Meaningful Update'
+    ,minutesInAssignment 'Minutes Assigned'
+    ,minutesInSection 'Minutes in Section'
+    --,murn
+    ,minutesInStatus 'Minutes in Status'
+    ,null 'Minutes til Due'
+    ,null 'Expected Work Minutes'
+    ,ISNULL(tsk.DueAt, FORMAT(tsk.DueOn, 'yyyy-MM-dd hh:mm:ss.fff')) 'Due At' -- Due at has a date time, but due on doesn't. I convert/combine them here.
+    ,AssigneedTo 'Currently Assigned To'
+    ,m.Completed
+    ,m.CompletedAt
+    ,completedBy 'Completed By'
+    ,TaskParentGid 'Task Parent Gid'
+	,stat.TaskStatus 'Task Status' --MT
+--	,cptstat.TaskStatus TaskStatusCPT
+	,ewt.EstimatedWorkTime 'Estimated Work Time'
+	,imp.Importance
+	,rc.RequestCategory 'Request Category'
+	,lon.LoanOfficerName 'Loan Officer Name'
+	,loe.LoanOfficerEmail 'Loan Officer Email'
+	,loc.BranchLocation 'Task Branch'
+	,rq.Requester
+	,pr.TaskPriority 'Task Priority'
+	,st.TaskState 'Task State'
+	,ced.ComplianceEditDate 'Compliance Edit Date'
+	,cad.ComplianceApprovedDate 'Compliance Approve Date'
+FROM MinuteCalculation m 
+left join historicalAssigneeLookup h on h.id = m.id
 
 
 
--- ---------------------------------------------------------------------------------------------------------------------------
--- --                                                                                                                       --
--- --	I copied Asana Tasks code from the AsanaTask Workbench job for performance reasons.                                  --
--- --  If you update below this then it's worth looking at the Asana Task workbench to see if you need to update that too.  --
--- --                                                                                                                       --
--- ---------------------------------------------------------------------------------------------------------------------------
+---------------------------------------------------------------------------------------------------------------------------
+--                                                                                                                       --
+--	I copied Asana Tasks code from the AsanaTask Workbench job for performance reasons.                                  --
+--  If you update below this then it's worth looking at the Asana Task workbench to see if you need to update that too.  --
+--                                                                                                                       --
+---------------------------------------------------------------------------------------------------------------------------
 
 
--- left join Asana.dbo.Task tsk on tsk.gid = m.customFieldLookupGid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,ce.Name TaskStatus
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
---             INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
---             INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
--- 		WHERE cf.Gid = '837754844706392' /*Task Status MT*/
---       ) stat ON stat.TaskGid = tsk.Gid
--- 	-- LEFT JOIN -- per Morgun we aren't using this field anymore
---     --   (
---     --     SELECT
---     --         tcfv.TaskGid
---     --         ,ce.Name TaskStatus
---     --     FROM Asana.dbo.TaskCustomFieldValue tcfv
---     --         INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
---     --         INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
--- 	-- 	WHERE cf.Gid = '1182211842722150' /*Task Status CPT*/
---     --   ) cptstat ON cptstat.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,tcfv.NumberValue EstimatedWorkTime
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
--- 		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Estimated Work Time*/
---       ) ewt ON ewt.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,tcfv.TextValue ComplianceEditDate
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
--- 		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Compliance Edit Date*/
---       ) ced ON ced.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,tcfv.TextValue ComplianceApprovedDate
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
--- 		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Compliance Approved Date*/
---       ) cad ON cad.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,ce.Name Importance
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
---             INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
---             INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
--- 		WHERE cf.Gid = '1165697343429332' /*Importance*/
---       ) imp ON imp.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,ce.Name RequestCategory
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
---             INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
---             INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
--- 		WHERE cf.Gid = '836007615682089' /*Request Category*/
---       ) rc ON rc.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,tcfv.TextValue LoanOfficerName
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
--- 		WHERE tcfv.CustomFieldGid = '636586031678972' /*LO Name*/
---       ) lon ON lon.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,tcfv.TextValue LoanOfficerEmail
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
--- 		WHERE tcfv.CustomFieldGid = '1144080599264139' /*LO Email*/
---       ) loe ON loe.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,ce.Name BranchLocation
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
---             INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
---             INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
--- 		WHERE cf.Gid = '833459733460742' /*Location*/
---       ) loc ON loc.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,tcfv.TextValue Requester
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
--- 		WHERE tcfv.CustomFieldGid = '868385257100501' /*Requester*/
---       ) rq ON rq.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,ce.Name TaskPriority
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
---             INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
---             INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
--- 		WHERE cf.Gid = '997470198794910' /*Priority*/
---       ) pr ON pr.TaskGid = tsk.Gid
--- 	LEFT JOIN
---       (
---         SELECT
---             tcfv.TaskGid
---             ,ce.Name TaskState
---         FROM Asana.dbo.TaskCustomFieldValue tcfv
---             INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
---             INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
--- 		WHERE cf.Gid = '1134784017412164' /*State*/
---       ) st ON st.TaskGid = tsk.Gid
+left join Asana.dbo.Task tsk on tsk.gid = m.customFieldLookupGid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name TaskStatus
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '837754844706392' /*Task Status MT*/
+      ) stat ON stat.TaskGid = tsk.Gid
+	-- LEFT JOIN -- per Morgun we aren't using this field anymore
+    --   (
+    --     SELECT
+    --         tcfv.TaskGid
+    --         ,ce.Name TaskStatus
+    --     FROM Asana.dbo.TaskCustomFieldValue tcfv
+    --         INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+    --         INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+	-- 	WHERE cf.Gid = '1182211842722150' /*Task Status CPT*/
+    --   ) cptstat ON cptstat.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.NumberValue EstimatedWorkTime
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Estimated Work Time*/
+      ) ewt ON ewt.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue ComplianceEditDate
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Compliance Edit Date*/
+      ) ced ON ced.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue ComplianceApprovedDate
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Compliance Approved Date*/
+      ) cad ON cad.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name Importance
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '1165697343429332' /*Importance*/
+      ) imp ON imp.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name RequestCategory
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '836007615682089' /*Request Category*/
+      ) rc ON rc.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue LoanOfficerName
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '636586031678972' /*LO Name*/
+      ) lon ON lon.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue LoanOfficerEmail
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1144080599264139' /*LO Email*/
+      ) loe ON loe.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name BranchLocation
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '833459733460742' /*Location*/
+      ) loc ON loc.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue Requester
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '868385257100501' /*Requester*/
+      ) rq ON rq.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name TaskPriority
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '997470198794910' /*Priority*/
+      ) pr ON pr.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name TaskState
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '1134784017412164' /*State*/
+      ) st ON st.TaskGid = tsk.Gid
 
--- )
+)
 
--- ----------------------------------------------------------------------------------
--- --                                                                              --
--- --                                                                              --
--- --                              Median Turn Time                                --
--- --                      With Expected Due Date Calculation                      --
--- --                                                                              --
--- --                                                                              --
--- ----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                              Median Turn Time                                --
+--                      With Expected Due Date Calculation                      --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
 
--- , requestCategoryRowNum as ( -- I wanted the median of the last 30 completed tasks that were completed less than 120 days ago. I filter out everything incomplete or older than 120 days here. It also made sense to exclude any events that weren't the creation update (that lives on the creation line).
--- 	select
--- 	row_number() over (partition by [request category] order by [updated at] desc) 'row num'
--- 	,id
--- 	from customFieldLookupAndJoin
--- 	where [type] = 'creation' and [Change Action] = 'completed' and datediff (day, getdate(), [Updated At]) > -120 -- I found some dirty data from more than 120 days ago and I'm not sure that stuff that old is going to relevant to how long marketing tasks take now.
--- )
+, requestCategoryRowNum as ( -- I wanted the median of the last 30 completed tasks that were completed less than 120 days ago. I filter out everything incomplete or older than 120 days here. It also made sense to exclude any events that weren't the creation update (that lives on the creation line).
+	select
+	row_number() over (partition by [request category] order by [updated at] desc) 'row num'
+	,id
+	from customFieldLookupAndJoin
+	where [type] = 'creation' and [Change Action] = 'completed' and datediff (day, getdate(), [Updated At]) > -120 -- I found some dirty data from more than 120 days ago and I'm not sure that stuff that old is going to relevant to how long marketing tasks take now.
+)
 
--- , medianTurnTimeByRequesetTypeLast30 as (
--- 	select
---     percentile_cont(0.5) within group (order by [Minutes in Status]) 
---         over (partition by [Request Category]) as 'Median Minutes for This Request Category'
--- 	,rn.[row num]
---     ,[Request Category]
---     from customFieldLookupAndJoin c
--- 	inner join requestCategoryRowNum rn on rn.Id = c.Id and rn.[row num] <= 30  -- I figured that a running median over the last 30 completed tasks for that request category should be a reasonable approximation of what the turn time will be. 
--- )
+, medianTurnTimeByRequesetTypeLast30 as (
+	select
+    percentile_cont(0.5) within group (order by [Minutes in Status]) 
+        over (partition by [Request Category]) as 'Median Minutes for This Request Category'
+	,rn.[row num]
+    ,[Request Category]
+    from customFieldLookupAndJoin c
+	inner join requestCategoryRowNum rn on rn.Id = c.Id and rn.[row num] <= 30  -- I figured that a running median over the last 30 completed tasks for that request category should be a reasonable approximation of what the turn time will be. 
+)
 
--- , medianTimeAggregation as ( -- I found it more performant to only have the median for all the request categories once. Testing confirmed this, so this makes a little reference table to reference below.
--- 	select
--- 	[Median Minutes for This Request Category]
--- 	,[Request Category]
--- 	from medianTurnTimeByRequesetTypeLast30
--- 	group by [Request Category], [Median Minutes for This Request Category]
--- )
+, medianTimeAggregation as ( -- I found it more performant to only have the median for all the request categories once. Testing confirmed this, so this makes a little reference table to reference below.
+	select
+	[Median Minutes for This Request Category]
+	,[Request Category]
+	from medianTurnTimeByRequesetTypeLast30
+	group by [Request Category], [Median Minutes for This Request Category]
+)
 
--- , dueAtMinuteCalculation as ( -- here I convert buisness minutes to business days (divide by 480) and calculate how many buisness days from now that is. I used CEILING() to pad the due day by a partial day. The expected due date should only populate on the creation line. I chose not use the average for no request category so that calculated median are filtered out here.
--- select 
--- [Median Minutes for This Request Category]
--- ,Calendar.[dbo].[AddBusDaysExcludingHolidayExcludeFirstDay](
---             CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, [Updated At]), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
---             CEILING([Median Minutes for This Request Category]/480)) 'expected due date'
--- ,mt.[Request Category]
--- ,j.id
--- from customFieldLookupAndJoin j
--- left outer join medianTimeAggregation mt on mt.[request category] = j.[request category]
--- where [type] = 'creation' and mt.[Request Category] is not null
--- )
+, dueAtMinuteCalculation as ( -- here I convert buisness minutes to business days (divide by 480) and calculate how many buisness days from now that is. I used CEILING() to pad the due day by a partial day. The expected due date should only populate on the creation line. I chose not use the average for no request category so that calculated median are filtered out here.
+select 
+[Median Minutes for This Request Category]
+,Calendar.[dbo].[AddBusDaysExcludingHolidayExcludeFirstDay](
+            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, [Updated At]), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+            CEILING([Median Minutes for This Request Category]/480)) 'expected due date'
+,mt.[Request Category]
+,j.id
+from customFieldLookupAndJoin j
+left outer join medianTimeAggregation mt on mt.[request category] = j.[request category]
+where [type] = 'creation' and mt.[Request Category] is not null
+)
 
--- , minuteJoin as (
--- select 
--- j.*
--- ,mc.[Median Minutes for This Request Category]
--- ,mc.[Expected Due Date]
--- from customFieldLookupAndJoin j
--- left outer join dueAtMinuteCalculation mc on mc.Id = j.Id
--- )
+, minuteJoin as (
+select 
+j.*
+,mc.[Median Minutes for This Request Category]
+,mc.[Expected Due Date]
+from customFieldLookupAndJoin j
+left outer join dueAtMinuteCalculation mc on mc.Id = j.Id
+)
 
--- ----------------------------------------------------------------------------------
--- --                                                                              --
--- --                                                                              --
--- --                               Membership Lookup                              --
--- --                                                                              --
--- --                                                                              --
--- ----------------------------------------------------------------------------------
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                               Membership Lookup                              --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
 
--- ,distictProject as ( -- I ended up just concatenating all the project and team names as seperate columns; this was the simplest and most scalable way to expose a varied number of relationships to domo. I'm just searching this string in a beast mode in DOMO filter by project or team.
---     select distinct
---     p.name,
---     j.[Task Gid] gid
---     from minuteJoin j
---     inner join asana.dbo.TaskMembership m on m.TaskGid = j.[Task Gid]
---     inner join asana.dbo.Project p on p.gid = m.ProjectGid
--- )
--- ,concatProjectMemberships as (
---     select 
---     string_agg(p.name, ';') projects,
---     p.gid
---     from distictProject p
---     group by p.gid
--- )
--- ,distictTeam as ( -- I had to use two distinct lookups because some tasks are part of say 6 projects and only 2 teams. I only wanted to list each team and project once, and this was the simplest and most performant way I could come up with to actively dedupe those relationships.
---     select distinct
---     p.TeamName,
---     j.[task gid] gid
---     from minuteJoin j
---     inner join asana.dbo.TaskMembership m on m.TaskGid = j.[Task Gid]
---     inner join asana.dbo.Project p on p.gid = m.ProjectGid
--- )
--- ,concatTeamMemberships as (
---     select 
---     string_agg(t.TeamName, ';') teams,
---     t.gid
---     from distictTeam t
---     group by t.gid
--- )
--- select 
--- j.*,
--- projects,
--- teams
--- from minuteJoin j 
--- left join concatProjectMemberships p on p.Gid = j.[Task Gid]
--- left join concatTeamMemberships tm on tm.Gid = j.[Task Gid]
+,distictProject as ( -- I ended up just concatenating all the project and team names as seperate columns; this was the simplest and most scalable way to expose a varied number of relationships to domo. I'm just searching this string in a beast mode in DOMO filter by project or team.
+    select distinct
+    p.name,
+    j.[Task Gid] gid
+    from minuteJoin j
+    inner join asana.dbo.TaskMembership m on m.TaskGid = j.[Task Gid]
+    inner join asana.dbo.Project p on p.gid = m.ProjectGid
+)
+,concatProjectMemberships as (
+    select 
+    string_agg(p.name, ';') projects,
+    p.gid
+    from distictProject p
+    group by p.gid
+)
+,distictTeam as ( -- I had to use two distinct lookups because some tasks are part of say 6 projects and only 2 teams. I only wanted to list each team and project once, and this was the simplest and most performant way I could come up with to actively dedupe those relationships.
+    select distinct
+    p.TeamName,
+    j.[task gid] gid
+    from minuteJoin j
+    inner join asana.dbo.TaskMembership m on m.TaskGid = j.[Task Gid]
+    inner join asana.dbo.Project p on p.gid = m.ProjectGid
+)
+,concatTeamMemberships as (
+    select 
+    string_agg(t.TeamName, ';') teams,
+    t.gid
+    from distictTeam t
+    group by t.gid
+)
+select 
+j.*,
+projects,
+teams
+from minuteJoin j 
+left join concatProjectMemberships p on p.Gid = j.[Task Gid]
+left join concatTeamMemberships tm on tm.Gid = j.[Task Gid]
 
