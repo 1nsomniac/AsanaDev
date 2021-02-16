@@ -388,7 +388,7 @@ select
     ,[User]
     ,m.CreatedAt 'Updated At'
     ,m.assignee 'Assignee'
-    ,h.historicalAssignee 'Historical Assignee'
+    ,trim(h.historicalAssignee) 'Historical Assignee'
     ,CreatedBy 'Created By'
     ,[Action]
     ,m.rn
