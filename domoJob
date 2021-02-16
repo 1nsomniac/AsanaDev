@@ -333,14 +333,17 @@ from MinuteCalculation
 ), historicalAssigneeLookup as (
 select 
 resourcegid, id, rn, assignee,
-    convert(varchar,
-        SUBSTRING(
-            MAX( CAST(rn AS BINARY(4)) + CAST(assignee AS BINARY(60)) )
-                OVER(partition by resourceGid ORDER BY rn
-                    ROWS UNBOUNDED PRECEDING ),
-        5, 60)
-    , 0) AS historicalAssignee
+    SUBSTRING(
+        MAX( CAST(rn AS BINARY(4)) + CAST(assignee AS BINARY(60)) )
+            OVER(partition by resourceGid ORDER BY rn
+                ROWS UNBOUNDED PRECEDING ),
+    5, 60) AS historicalAssigneeBinary
 FROM assignmentEvent
+), historicalAssigeeConversion as (
+    select
+    id,
+    cast(historicalAssigneeBinary as nvarchar) historicalAssignee
+    from historicalAssigneeLookup
 )
 
 -- select h.*, m.* from minutecalculation m
@@ -422,7 +425,7 @@ select
 	,ced.ComplianceEditDate 'Compliance Edit Date'
 	,cad.ComplianceApprovedDate 'Compliance Approve Date'
 FROM MinuteCalculation m 
-left join historicalAssigneeLookup h on h.id = m.id
+left join historicalAssigeeConversion h on h.id = m.id
 
 
 
