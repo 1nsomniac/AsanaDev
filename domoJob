@@ -1,0 +1,625 @@
+-- This query aims to output a table that you could use to understand a specific tasks journey to completion, current status, and expected completion date. You could also use it to underand the trends in completions/work for all tasks or a certain subset. To achieve this I first filter out anything that isn't a assignee or section addition or removal event. Then I filter out duplicitious events and add a creation row for each task. Then I'll use the business minute calcution to output the time, in business minutes, that a task has been in a certain section or assignment. Then I get the median completion time (in business minutes) for each request category and calculate an expecuted due date. 
+-- As far as perfomrance goes this guy takes about 50 seconds to ouput 48431 rows. This is filtered down from 41378 task rows and 120380 event rows. This will run away from us eventually unless we implement an update schema on DOMO workbench and only update/query incomplete tasks while retaining the data from completed tasks.
+
+
+
+
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                                 Section Logic                                --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+
+
+with lastSectionEvent as (
+    select
+    lag ([action]) over (partition by resourcegid, parentgid order by e.createdAt) as lagAction, -- find the last event for this section. If the action on the last event is the same then filter out this line as a duplicate.
+    row_number() over (partition by resourcegid order by e.CreatedAt) srn, -- this is for debugging mostly but you can order the assignee/section events on the output table with it if you want to.
+    s.name, s.projectgid
+    ,e.*
+    from asana.dbo.event e
+    inner join asana.dbo.section s on s.gid = e.parentgid 
+    where [action] = 'added' or [action] = 'removed' -- filter out all events except section additions/removals.
+), sectionRowNumbers as (
+    select
+    row_number() over (partition by resourceGid, ParentGid order by createdAt) fsrn,
+    lead(createdAt) over (partition by resourceGid, ParentGid order by createdAt) sectionRemovedAt,
+    lead(usergid) over (partition by resourceGid, ParentGid order by createdAt) SectionRemovedByGid,
+    *
+    from lastSectionEvent w
+    where lagAction is null or lagAction != [action]   -- if the same event happens twice (task added to section followed by the same taks being added to the same section) then the action immediately preceeding this line will be duplicitous. If it is then you should filter out the second line with the same action. The first action won't have a preceeding action so it will always be kept.
+)
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                                Assignee Logic                                --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+
+, numberedAssignments as (
+    select
+    row_number() over (partition by resourceGid order by createdAt) arn,
+    lag(ChangeNewValueGid) over (partition by resourceGid order by createdAt) lastAssignee,
+    *
+    from Asana.dbo.Event
+    where ChangeField = 'assignee'
+
+), grabLastAssignmentTime as (
+    select
+    row_number() over (partition by resourceGid order by n.createdAt) farn,
+    lead(n.createdAt) over (partition by resourceGid order by n.createdAt) AssignmentRemovedAt,
+    u.Name Assignee,
+    n.*
+    from numberedAssignments n
+    inner join Asana.dbo.[User] u on u.gid = n.ChangeNewValueGid 
+    where ChangeNewValueGid != lastAssignee or lastAssignee is null -- same mechanics as above, sans the section grouping; assignee events are linear and not cocurrent; only one person can be assigned to a task at a time, so if the same person is assigneed to the task twice then it's a duplicate that should be filterd out. 
+)
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                            Section/Assignee Join                             --
+--                                                                              --
+--                                                                              --
+----------------------------------------..----------------------------------------
+
+,sectionAndAssignmentEventUnion as ( -- join section and assingee info while normalizing the column names.
+select 
+    Id,
+    'assignment' [type],
+    farn, -- these should be decipherable on the final output by the type column; all the section events should be enumerated here if you filter by [type] same for assignee events. all columns are enumerated to remove unnecessary fields.
+    AssignmentRemovedAt meaningfulUpdate,
+    null sectionRemovedAt,
+    null srn,
+    null sectionName,
+    null ProjectGid,
+    AssignmentRemovedAt,
+    Assignee,
+    arn,
+    [Action],
+    CreatedAt,
+    ParentGid,
+    ResourceGid,
+    UserGid,
+    ChangeAction,
+    ChangeAddedValueGid,
+    ChangeField,
+    ChangeNewValueGid,
+    ChangeRemovedValueGid,
+    FromResourceType 
+from grabLastAssignmentTime
+union
+select 
+    Id,
+    'section' [type],
+    fsrn,
+    sectionRemovedAt meaningfulUpdate,
+    sectionRemovedAt,
+    srn,
+    [name] sectionName,
+    ProjectGID,
+    null AssignmentRemovedAt,
+    null Assignee,
+    null arn,
+    [Action],
+    CreatedAt,
+    ParentGid,
+    ResourceGid,
+    UserGid,
+    ChangeAction,
+    ChangeAddedValueGid,
+    ChangeField,
+    ChangeNewValueGid,
+    ChangeRemovedValueGid,
+    FromResourceType 
+
+from sectionRowNumbers 
+where [action] != 'removed'
+)
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                           Created/Completed Logic                            --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+
+, numberedTasks as ( -- add row numbers to the events so you can find the first one.
+    select
+    row_number() over (partition by resourceGid order by createdAt) rn,
+    *
+    from sectionAndAssignmentEventUnion
+), createdAndCompletedEvent as ( -- add creation lines for all tasks and union them in.
+    select
+        null Id,
+        'creation' [type],
+        rn - 1 rn,   -- the creation line has a row number of 0
+        t.CompletedAt meaningfulUpdate,
+        t.CompletedAt sectionRemovedAt,
+        0 srn,   -- the creation line has a row number of 0
+        t.Name sectionName,
+        null ProjectGid,
+        t.CompletedAt assignmentRemovedAt,
+        null Assignee,
+        0 arn,   -- the creation line has a row number of 0
+        case when t.[CompletedAt] is not null then 'completed' else 'created' end [Action],
+        t.CreatedAt CreatedAt,
+        null ParentGid,
+        ResourceGid,
+        t.CreatedByGid UserGid,
+        case when t.[CompletedAt] is not null then 'completed' else 'created' end ChangeAction,
+        null ChangeAddedValueGid,
+        null ChangeField,
+        t.CompletedByGid ChangeNewValueGid,
+        null ChangeRemovedValueGid,
+        null FromResourceType
+
+    from numberedTasks n
+    inner join Asana.dbo.[task] t on t.Gid = n.ResourceGid and n.rn = 1 and t.CreatedAt is not null -- only create one row, do that "joining" (or creating) on the first row.
+), statusUnion as (
+    select * from createdAndCompletedEvent
+    union
+    select * from sectionAndAssignmentEventUnion
+)
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                         Business Minute Calculations                         -- 
+--                             With Membership Join                             --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+
+, addingCompletedInfo as (
+    select
+    u.*,
+    t.CompletedAt,
+    t.Completed,
+    t.ParentGid TaskParentGid,
+    ISNULL(t.ParentGid, t.Gid) customFieldLookupGid, -- when the task is a subtask then save the parent task GID here. This is so that the custom fields are tracked for subtasts (ie importance)
+    us.[Name] [User],
+    ua.[Name] AssigneedTo,
+    cru.[Name] CreatedBy,
+    cou.[Name] CompletedBy
+    from statusUnion u
+    inner join Asana.dbo.Task t on t.gid = u.ResourceGid
+    left join asana.dbo.[User] us on us.gid = u.usergid
+    left join asana.dbo.[User] ua on ua.gid = t.AssigneeGid
+    left join asana.dbo.[User] cru on cru.gid = t.CreatedByGid -- as of feb 12 20201 this wasn't populating the task table, but it should be. Hopefully these work later when that field starts to populate
+    left join asana.dbo.[User] cou on cou.gid = t.CompletedByGid -- as of feb 12 20201 this wasn't populating the task table, but it should be. Hopefully these work later when that field starts to populate
+
+)
+, nextMeaningfulUpdate as (
+    select
+    lead(meaningfulUpdate) over (partition by resourceGid order by meaningfulUpdate) mu
+    ,*
+    from addingCompletedInfo
+    where meaningfulUpdate is not null
+)
+, nextMeaningfulUpdateUnion as (
+    select * from nextMeaningfulUpdate
+    union
+    select null mu, * from addingCompletedInfo
+    where meaningfulUpdate is null
+
+)
+
+, MinuteCalculation as (
+    select
+        u.Id,
+        mu,
+        [type],
+        rn,   
+        meaningfulUpdate,
+        case -- this passes the 'meaningful events' chronologically - this is to get an understanding of the cadence of the task or how often it's getting passed from person to person or section to section. Like the subsequent minute-logic-passers it should count the completion date as the final event, meaning that it passes the last section or assignee event before the compeltion time and compeltion event time for the final minutesInStatus calculation. It should return null on the lines following the completion event. On the creation line it should calcute the total time betweeen event creation and compeltion (if incomplete it will calculate until now).
+            when [type] = 'creation'
+            then Calendar.[dbo].[GetBusMinutesExcludingHolidayExcludeFirstDay](
+                CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, u.CreatedAt), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+                ISNULL(
+                    CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, meaningfulUpdate), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))),
+                    GETDATE()
+                    ))
+            when meaningfulUpdate is not null
+            then case
+                when meaningfulUpdate > completedAt and completedAt is not null         -- if the starting date is after the completed date then 0
+                    then 0 
+                when (
+                        mu > completedAt -- if the ending date is after the completed date  
+                        and completedAt is not null                                                             -- then use the completed date as the ending date for the calculation
+                    ) or (
+                        mu is null and completedAt is not null --< GETDATE() -- if there is no end date
+                    )
+                    then Calendar.[dbo].[GetBusMinutesExcludingHolidayExcludeFirstDay](
+                                CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, meaningfulUpdate), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+                                CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, completedAt), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))))
+                else Calendar.[dbo].[GetBusMinutesExcludingHolidayExcludeFirstDay](
+                CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, meaningfulUpdate), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+                ISNULL(
+                    CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, mu), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))),
+                    GETDATE()
+                    )) 
+            end
+            else null 
+        end minutesInStatus,
+        sectionRemovedAt,
+        case -- this should pass the last section entry datetime for that section/task and subsequent removal event datetime. It should return null if the entry event is before the completion datetime. If the completion datetime is after the entry datetime and before the completion datetime then it will pass the entry datetime and the completion datetime.
+            when [type] != 'assignment'
+                then case 
+                    when u.createdAt > completedAt and completedAt is not null
+                        then null 
+                    when (sectionRemovedAt > completedAt and completedAt is not null) or (sectionRemovedAt is null and CompletedAt < GETDATE())
+                        then Calendar.[dbo].[GetBusMinutesExcludingHolidayExcludeFirstDay](
+                            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, u.createdat), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+                            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, completedAt), DATENAME(TZOFFSET, SYSDATETIMEOFFSET())))) 
+                    else Calendar.[dbo].[GetBusMinutesExcludingHolidayExcludeFirstDay](
+                        CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, u.createdat), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+                        ISNULL(
+                            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, sectionRemovedAt), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))),
+                            GETDATE()
+                            )) 
+                    end 
+            else null
+        end minutesInSection,
+        srn,
+        sectionName,
+        ProjectGid,
+        p.[name] Project,
+        p.TeamName Team,
+        assignmentRemovedAt,
+        case  -- this should send the timestamps of the original assignment date and the date of assignment change, or the original assingment date and now. This should return null for assignment events that start after the task has been completed, and will calculate the time between assignment start and completion time if the completion time happens after the assignment start time and before the assignment conclusion.
+            when [type] != 'section'
+                then case 
+                    when u.createdAt > completedAt and completedAt is not null
+                        then null 
+                    when (assignmentRemovedAt > completedAt and completedAt is not null) or (assignmentRemovedAt is null and CompletedAt < GETDATE())
+                        then Calendar.[dbo].[GetBusMinutesExcludingHolidayExcludeFirstDay](
+                            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, u.createdat), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+                            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, completedAt), DATENAME(TZOFFSET, SYSDATETIMEOFFSET())))) 
+                    else Calendar.[dbo].[GetBusMinutesExcludingHolidayExcludeFirstDay](
+                        CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, u.createdat), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+                        ISNULL(
+                            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, assignmentRemovedAt), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))),
+                            GETDATE()
+                            )) 
+                    end 
+            else null
+        end minutesInAssignment,
+        Assignee,
+        AssigneedTo,
+        arn,
+        [Action],
+        [User],
+        u.CreatedAt,
+        CreatedBy,
+        CompletedAt,
+        CompletedBy,
+        Completed,
+        ParentGid,
+        ResourceGid,
+        TaskParentGid,
+        UserGid,
+        ChangeAction,
+        ChangeAddedValueGid,
+        ChangeField,
+        ChangeNewValueGid,
+        ChangeRemovedValueGid,
+        FromResourceType,
+        customFieldLookupGid
+    from nextMeaningfulUpdateUnion u
+    left join Asana.dbo.Project p on p.gid = u.ProjectGid
+)
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                             Custom Field Lookup                              --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+, customFieldLookupAndJoin as ( -- this was originally the output which is why the refactoring was done here; I later needed to add successive logic and kept the refactoring here.
+select
+    row_number() over (order by m.createdAt) Id
+    -- ,case when -- I was trying to use this to understand the current 'status' of a task before I realized that there was already a status field and I should just use that. Also this is terribly slow.
+    --     [type] = 'creation' and 
+    --     (
+    --         select
+    --         max(m2.CreatedAt) over (partition by m2.resourceGid, m2.[type], m2.sectionRemovedAt)
+    --         from MinuteCalculation m2
+    --         where m2.[type] = 'section' and m2.sectionRemovedAt is null and m2.resourceGid = m.resourceGid
+    --     ) is null
+    --     then 1
+
+        
+    --     when
+    --     [type] = 'section' and sectionRemovedAt is null
+    --     and max(m.CreatedAt) over (partition by resourceGid, [type], sectionRemovedAt) = m.CreatedAt
+    --     then 1
+    --     else 0
+    --     end 'Last Section Added'
+    
+    ,m.Id 'Event Id'
+    ,[type]
+    ,ResourceGid 'Task Gid'
+    ,tsk.Name
+    ,ChangeAction 'Change Action'
+    ,[User]
+    ,m.CreatedAt 'Updated At'
+    ,assignee 'Assignee'
+    ,CreatedBy 'Created By'
+    ,[Action]
+    ,rn
+    ,sectionName Section
+    ,Project
+    ,Team
+    ,sectionRemovedAt 'Left Section At'
+    ,assignmentRemovedAt 'Assignment Ended At'
+    ,meaningfulUpdate 'Meaningful Update'
+    ,mu 'Next Meaningful Update'
+    ,minutesInAssignment 'Minutes Assigned'
+    ,minutesInSection 'Minutes in Section'
+    --,murn
+    ,minutesInStatus 'Minutes in Status'
+    ,null 'Minutes til Due'
+    ,null 'Expected Work Minutes'
+    ,ISNULL(tsk.DueAt, FORMAT(tsk.DueOn, 'yyyy-MM-dd hh:mm:ss.fff')) 'Due At' -- Due at has a date time, but due on doesn't. I convert/combine them here.
+    ,AssigneedTo 'Currently Assigned To'
+    ,m.Completed
+    ,m.CompletedAt
+    ,completedBy 'Completed By'
+    ,TaskParentGid 'Task Parent Gid'
+	,stat.TaskStatus 'Task Status' --MT
+--	,cptstat.TaskStatus TaskStatusCPT
+	,ewt.EstimatedWorkTime 'Estimated Work Time'
+	,imp.Importance
+	,rc.RequestCategory 'Request Category'
+	,lon.LoanOfficerName 'Loan Officer Name'
+	,loe.LoanOfficerEmail 'Loan Officer Email'
+	,loc.BranchLocation 'Task Branch'
+	,rq.Requester
+	,pr.TaskPriority 'Task Priority'
+	,st.TaskState 'Task State'
+	,ced.ComplianceEditDate 'Compliance Edit Date'
+	,cad.ComplianceApprovedDate 'Compliance Approve Date'
+FROM MinuteCalculation m 
+
+
+
+---------------------------------------------------------------------------------------------------------------------------
+--                                                                                                                       --
+--	I copied Asana Tasks code from the AsanaTask Workbench job for performance reasons.                                  --
+--  If you update below this then it's worth looking at the Asana Task workbench to see if you need to update that too.  --
+--                                                                                                                       --
+---------------------------------------------------------------------------------------------------------------------------
+
+
+left join Asana.dbo.Task tsk on tsk.gid = m.customFieldLookupGid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name TaskStatus
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '837754844706392' /*Task Status MT*/
+      ) stat ON stat.TaskGid = tsk.Gid
+	-- LEFT JOIN -- per Morgun we aren't using this field anymore
+    --   (
+    --     SELECT
+    --         tcfv.TaskGid
+    --         ,ce.Name TaskStatus
+    --     FROM Asana.dbo.TaskCustomFieldValue tcfv
+    --         INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+    --         INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+	-- 	WHERE cf.Gid = '1182211842722150' /*Task Status CPT*/
+    --   ) cptstat ON cptstat.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.NumberValue EstimatedWorkTime
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Estimated Work Time*/
+      ) ewt ON ewt.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue ComplianceEditDate
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Compliance Edit Date*/
+      ) ced ON ced.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue ComplianceApprovedDate
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1137235853067959' /*Compliance Approved Date*/
+      ) cad ON cad.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name Importance
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '1165697343429332' /*Importance*/
+      ) imp ON imp.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name RequestCategory
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '836007615682089' /*Request Category*/
+      ) rc ON rc.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue LoanOfficerName
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '636586031678972' /*LO Name*/
+      ) lon ON lon.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue LoanOfficerEmail
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '1144080599264139' /*LO Email*/
+      ) loe ON loe.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name BranchLocation
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '833459733460742' /*Location*/
+      ) loc ON loc.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,tcfv.TextValue Requester
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+		WHERE tcfv.CustomFieldGid = '868385257100501' /*Requester*/
+      ) rq ON rq.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name TaskPriority
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '997470198794910' /*Priority*/
+      ) pr ON pr.TaskGid = tsk.Gid
+	LEFT JOIN
+      (
+        SELECT
+            tcfv.TaskGid
+            ,ce.Name TaskState
+        FROM Asana.dbo.TaskCustomFieldValue tcfv
+            INNER JOIN Asana.dbo.CustomField cf on cf.Gid = tcfv.CustomFieldGid
+            INNER JOIN Asana.dbo.CustomEnum ce on ce.Gid = tcfv.EnumValueGid
+		WHERE cf.Gid = '1134784017412164' /*State*/
+      ) st ON st.TaskGid = tsk.Gid
+
+)
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                              Median Turn Time                                --
+--                      With Expected Due Date Calculation                      --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+
+, requestCategoryRowNum as ( -- I wanted the median of the last 30 completed tasks that were completed less than 120 days ago. I filter out everything incomplete or older than 120 days here. It also made sense to exclude any events that weren't the creation update (that lives on the creation line).
+	select
+	row_number() over (partition by [request category] order by [updated at] desc) 'row num'
+	,id
+	from customFieldLookupAndJoin
+	where [type] = 'creation' and [Change Action] = 'completed' and datediff (day, getdate(), [Updated At]) > -120 -- I found some dirty data from more than 120 days ago and I'm not sure that stuff that old is going to relevant to how long marketing tasks take now.
+)
+
+, medianTurnTimeByRequesetTypeLast30 as (
+	select
+    percentile_cont(0.5) within group (order by [Minutes in Status]) 
+        over (partition by [Request Category]) as 'Median Minutes for This Request Category'
+	,rn.[row num]
+    ,[Request Category]
+    from customFieldLookupAndJoin c
+	inner join requestCategoryRowNum rn on rn.Id = c.Id and rn.[row num] <= 30  -- I figured that a running median over the last 30 completed tasks for that request category should be a reasonable approximation of what the turn time will be. 
+)
+
+, medianTimeAggregation as ( -- I found it more performant to only have the median for all the request categories once. Testing confirmed this, so this makes a little reference table to reference below.
+	select
+	[Median Minutes for This Request Category]
+	,[Request Category]
+	from medianTurnTimeByRequesetTypeLast30
+	group by [Request Category], [Median Minutes for This Request Category]
+)
+
+, dueAtMinuteCalculation as ( -- here I convert buisness minutes to business days (divide by 480) and calculate how many buisness days from now that is. I used CEILING() to pad the due day by a partial day. The expected due date should only populate on the creation line. I chose not use the average for no request category so that calculated median are filtered out here.
+select 
+[Median Minutes for This Request Category]
+,Calendar.[dbo].[AddBusDaysExcludingHolidayExcludeFirstDay](
+            CONVERT(DATETIME, SWITCHOFFSET(CONVERT(datetimeoffset, [Updated At]), DATENAME(TZOFFSET, SYSDATETIMEOFFSET()))), 
+            CEILING([Median Minutes for This Request Category]/480)) 'expected due date'
+,mt.[Request Category]
+,j.id
+from customFieldLookupAndJoin j
+left outer join medianTimeAggregation mt on mt.[request category] = j.[request category]
+where [type] = 'creation' and mt.[Request Category] is not null
+)
+
+, minuteJoin as (
+select 
+j.*
+,mc.[Median Minutes for This Request Category]
+,mc.[Expected Due Date]
+from customFieldLookupAndJoin j
+left outer join dueAtMinuteCalculation mc on mc.Id = j.Id
+)
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
+--                               Membership Lookup                              --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+
+,distictProject as ( -- I ended up just concatenating all the project and team names as seperate columns; this was the simplest and most scalable way to expose a varied number of relationships to domo. I'm just searching this string in a beast mode in DOMO filter by project or team.
+    select distinct
+    p.name,
+    j.[Task Gid] gid
+    from minuteJoin j
+    inner join asana.dbo.TaskMembership m on m.TaskGid = j.[Task Gid]
+    inner join asana.dbo.Project p on p.gid = m.ProjectGid
+)
+,concatProjectMemberships as (
+    select 
+    string_agg(p.name, ';') projects,
+    p.gid
+    from distictProject p
+    group by p.gid
+)
+,distictTeam as ( -- I had to use two distinct lookups because some tasks are part of say 6 projects and only 2 teams. I only wanted to list each team and project once, and this was the simplest and most performant way I could come up with to actively dedupe those relationships.
+    select distinct
+    p.TeamName,
+    j.[task gid] gid
+    from minuteJoin j
+    inner join asana.dbo.TaskMembership m on m.TaskGid = j.[Task Gid]
+    inner join asana.dbo.Project p on p.gid = m.ProjectGid
+)
+,concatTeamMemberships as (
+    select 
+    string_agg(t.TeamName, ';') teams,
+    t.gid
+    from distictTeam t
+    group by t.gid
+)
+
+select 
+j.*,
+projects,
+teams
+from minuteJoin j 
+left join concatProjectMemberships p on p.Gid = j.[Task Gid]
+left join concatTeamMemberships tm on tm.Gid = j.[Task Gid]
