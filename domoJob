@@ -318,6 +318,43 @@ where [action] != 'removed'
 ----------------------------------------------------------------------------------
 --                                                                              --
 --                                                                              --
+--                          Historical Assignee Lookup                          --
+--                                                                              --
+--                                                                              --
+----------------------------------------------------------------------------------
+
+, assignmentEvent as (
+select 
+row_number() over (partition by resourcegid order by createdAt) rn,
+assignee,
+resourcegid,
+id
+from MinuteCalculation
+), historicalAssigneeLookup as (
+select 
+resourcegid, id, rn, assignee,
+    SUBSTRING(
+        MAX( CAST(rn AS BINARY(4)) + CAST(assignee AS BINARY(60)) )
+            OVER(partition by resourceGid ORDER BY rn
+                ROWS UNBOUNDED PRECEDING ),
+    5, 60) AS historicalAssigneeBinary
+FROM assignmentEvent
+), historicalAssigeeConversion as (
+    select
+    id,
+    cast(historicalAssigneeBinary as nvarchar) historicalAssignee
+    from historicalAssigneeLookup
+)
+
+-- select h.*, m.* from minutecalculation m
+-- left join historicalAssigneeLookup h on h.id = m.id
+-- where m.resourcegid = '1177665031499346'
+-- order by m.ResourceGid, m.createdat desc
+--48584
+
+----------------------------------------------------------------------------------
+--                                                                              --
+--                                                                              --
 --                             Custom Field Lookup                              --
 --                                                                              --
 --                                                                              --
@@ -345,15 +382,16 @@ select
     
     ,m.Id 'Event Id'
     ,[type]
-    ,ResourceGid 'Task Gid'
+    ,m.ResourceGid 'Task Gid'
     ,tsk.Name
     ,ChangeAction 'Change Action'
     ,[User]
     ,m.CreatedAt 'Updated At'
-    ,assignee 'Assignee'
+    ,m.assignee 'Assignee'
+    ,trim(h.historicalAssignee) 'Historical Assignee'
     ,CreatedBy 'Created By'
     ,[Action]
-    ,rn
+    ,m.rn
     ,sectionName Section
     ,Project
     ,Team
@@ -387,6 +425,7 @@ select
 	,ced.ComplianceEditDate 'Compliance Edit Date'
 	,cad.ComplianceApprovedDate 'Compliance Approve Date'
 FROM MinuteCalculation m 
+left join historicalAssigeeConversion h on h.id = m.id
 
 
 
@@ -615,7 +654,6 @@ left outer join dueAtMinuteCalculation mc on mc.Id = j.Id
     from distictTeam t
     group by t.gid
 )
-
 select 
 j.*,
 projects,
@@ -623,3 +661,4 @@ teams
 from minuteJoin j 
 left join concatProjectMemberships p on p.Gid = j.[Task Gid]
 left join concatTeamMemberships tm on tm.Gid = j.[Task Gid]
+
