@@ -333,13 +333,13 @@ from MinuteCalculation
 ), historicalAssigneeLookup as (
 select 
 resourcegid, id, rn, assignee,
-    CAST(
+    convert(varchar,
         SUBSTRING(
             MAX( CAST(rn AS BINARY(4)) + CAST(assignee AS BINARY(60)) )
                 OVER(partition by resourceGid ORDER BY rn
                     ROWS UNBOUNDED PRECEDING ),
         5, 60)
-    AS varchar) AS historicalAssignee
+    , 0) AS historicalAssignee
 FROM assignmentEvent
 )
 
